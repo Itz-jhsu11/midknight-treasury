@@ -430,6 +430,17 @@
     </div>
     <div class="err" id="login-err"></div>
   </div>
+  <div class="card hairline-top" id="login-new-card" style="display:none">
+    <div class="field"><label for="new-name">Your name</label><input id="new-name" autocomplete="off" maxlength="40" placeholder="e.g. Alex Kim"></div>
+    <div class="field"><label for="new-pin">Choose a PIN (4–8 digits)</label><input id="new-pin" inputmode="numeric" type="password" maxlength="8" placeholder="••••" autocomplete="off"></div>
+    <div style="display:flex;gap:10px">
+      <button class="btn ghost" id="new-back">Back</button>
+      <button class="btn primary" id="new-go" style="flex:1">Create account</button>
+    </div>
+    <div class="err" id="new-err"></div>
+    <p class="hint" style="margin:12px 0 0">New accounts start as Member — an admin can change your role in the Team tab.</p>
+  </div>
+  <button class="btn ghost" id="login-new-toggle" style="margin-top:16px">+ New here? Create your account</button>
 </div>
 
 <!-- ===== app ===== -->
@@ -740,7 +751,48 @@ function renderLoginRoster(){
 $("#login-back").addEventListener("click",()=>{
   $("#login-pin-card").style.display="none";
   $("#login-list-card").style.display="";
+  $("#login-new-toggle").style.display="";
   S.pendingLogin=null;
+});
+
+/* --- create account from the login screen (starts as member) --- */
+$("#login-new-toggle").addEventListener("click",()=>{
+  $("#login-list-card").style.display="none";
+  $("#login-pin-card").style.display="none";
+  $("#login-new-toggle").style.display="none";
+  $("#new-name").value=""; $("#new-pin").value=""; $("#new-err").textContent="";
+  $("#login-new-card").style.display="";
+  $("#new-name").focus();
+});
+$("#new-back").addEventListener("click",()=>{
+  $("#login-new-card").style.display="none";
+  $("#login-list-card").style.display="";
+  $("#login-new-toggle").style.display="";
+});
+$("#new-go").addEventListener("click",async ()=>{
+  const err=$("#new-err"); err.textContent="";
+  const name=$("#new-name").value.trim();
+  const pin=$("#new-pin").value.trim();
+  if(!name){ err.textContent="Enter your name."; return; }
+  if(S.accounts.some(a=>a.name.trim().toLowerCase()===name.toLowerCase())){
+    err.textContent="There's already an account with that name — pick it from the list, or use a different name."; return;
+  }
+  if(!/^\d{4,8}$/.test(pin)){ err.textContent="PIN must be 4–8 digits."; return; }
+  const btn=$("#new-go"); btn.disabled=true;
+  try{
+    const id=uid();
+    const pinHash=await hashPin(id,pin);
+    store.set("mm_session", id);
+    await S.db.collection("accounts").doc(id).set({
+      name, role:"member", pinHash, active:true, createdAt:Date.now(),
+    });
+    $("#login-new-card").style.display="none";
+    $("#login-list-card").style.display="";
+    $("#login-new-toggle").style.display="";
+    if(!S.me){ const a=S.accounts.find(x=>x.id===id); if(a) signIn(a); }
+    toast("Welcome, "+name+"!");
+  }catch(e){ store.del("mm_session"); err.textContent="Couldn't create the account ("+(e.code||"error")+"). Try again."; }
+  btn.disabled=false;
 });
 async function tryLogin(){
   const a = S.pendingLogin; if(!a) return;
