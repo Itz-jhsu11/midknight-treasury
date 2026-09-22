@@ -70,6 +70,11 @@
     background:var(--panel-2);color:var(--ink);
     padding:9px 16px;font-size:14px;font-weight:600;
   }
+  a.btn{text-decoration:none}
+  .budget-progress{height:6px;border-radius:99px;background:var(--line);overflow:hidden;margin-top:8px;min-width:100px}
+  .budget-progress span{height:100%;display:block;background:var(--gold)}
+  .budget-progress.over span{background:var(--bad)}
+  .budget-plan-fields{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:0 16px}
   .btn:hover{border-color:#3a4a92}
   .btn.primary{background:var(--gold);border-color:var(--gold);color:#141b3f}
   .btn.primary:hover{background:#f4dc8b}
@@ -253,7 +258,7 @@
 (function(){
   let resolve; window.__dbReady = new Promise(r=>{resolve=r;});
   const API = "https://api.github.com/repos/Itz-jhsu11/midknight-treasury-data/contents/data.json";
-  const COLLS = ["accounts","transactions","orders"];
+  const COLLS = ["accounts","transactions","orders","budgets","integrations"];
   let token = null;
   try{ token = localStorage.getItem("mm_token"); }catch(e){}
 
@@ -288,12 +293,18 @@
   // serialized read-modify-write with conflict retry: `fn` mutates a fresh
   // copy of the data and is re-applied if someone else wrote first
   let chain = Promise.resolve();
+  function enqueue(run){
+    const p = chain.then(run);
+    chain = p.catch(()=>{});
+    return p;
+  }
   function mutate(label, fn){
     const run = async ()=>{
       for(let attempt=0; attempt<5; attempt++){
         if(!state.data || attempt>0) await fetchData(true);
         const next = JSON.parse(JSON.stringify(state.data));
         fn(next);
+        if(JSON.stringify(next)===JSON.stringify(state.data)) return;
         const body = JSON.stringify({ message:"treasury: "+label, sha:state.sha,
           content: b64encode(JSON.stringify(next)) });
         const r = await fetch(API, {method:"PUT", headers:{...headers(token),"Content-Type":"application/json"}, body});
@@ -307,9 +318,7 @@
       }
       throw {code:"conflict", message:"Too many simultaneous edits"};
     };
-    const p = chain.then(run);
-    chain = p.catch(()=>{});
-    return p;
+    return enqueue(run);
   }
 
   const newId = () => "x"+Date.now().toString(36)+Math.random().toString(36).slice(2,8);
@@ -325,6 +334,7 @@
     };
   }
   const db = {
+    atomic: mutate,
     collection: name => ({
       orderBy(){ return this; }, limit(){ return this; },
       onSnapshot(cb, err){
@@ -353,9 +363,9 @@
   if(!token){ window.__needsKey = true; resolve(null); return; }
   (async ()=>{
     try{
-      await fetchData(true);
-      setInterval(()=>{ fetchData().catch(()=>{}); }, 10000);
-      addEventListener("focus", ()=>{ fetchData().catch(()=>{}); });
+      await enqueue(()=>fetchData(true));
+      setInterval(()=>{ enqueue(()=>fetchData()).catch(()=>{}); }, 10000);
+      addEventListener("focus", ()=>{ enqueue(()=>fetchData()).catch(()=>{}); });
       resolve(db);
     }catch(e){
       if(e.code==="http_401" || e.code==="http_403" || e.code==="http_404"){
@@ -465,7 +475,8 @@
 
   <nav class="tabs" role="tablist">
     <button data-tab="dash" class="on">DASHBOARD</button>
-    <button data-tab="ledger">BUDGET</button>
+    <button data-tab="budget">BUDGET</button>
+    <button data-tab="ledger">TRANSACTIONS</button>
     <button data-tab="orders">PURCHASE ORDERS<span class="badge" id="po-badge" style="display:none">0</span></button>
     <button data-tab="team">TEAM</button>
   </nav>
@@ -485,10 +496,28 @@
       </div>
     </section>
 
+    <!-- category budget -->
+    <section class="tabpane" id="pane-budget">
+      <div class="pane-head">
+        <div><h2>CATEGORY BUDGET</h2><div class="sub">Plan the season. See what’s spent, committed, and still available.</div></div>
+        <button class="btn primary" id="btn-edit-budget">Edit budget</button>
+      </div>
+      <div class="readonly-note" id="budget-ro" style="display:none">Everyone can view the budget. A treasurer or admin can set category amounts.</div>
+      <div class="stat-row">
+        <div class="stat gold"><div class="lbl">Planned budget</div><div class="val money" id="b-planned">—</div><div class="note">Across all categories</div></div>
+        <div class="stat bad"><div class="lbl">Actual spending</div><div class="val money" id="b-spent">$0.00</div><div class="note">Expenses recorded in transactions</div></div>
+        <div class="stat info"><div class="lbl">Committed</div><div class="val money" id="b-committed">$0.00</div><div class="note">Approved and ordered, not yet expensed</div></div>
+        <div class="stat good"><div class="lbl">Budget remaining</div><div class="val money" id="b-remaining">—</div><div class="note">Planned − spent − committed</div></div>
+      </div>
+      <div class="readonly-note" id="budget-note"></div>
+      <div class="table-wrap" id="budget-table-wrap"></div>
+      <p class="hint">Pending requests appear separately until approved. Received orders count as spending once. Unbudgeted spending still counts in the total.</p>
+    </section>
+
     <!-- ledger -->
     <section class="tabpane" id="pane-ledger">
       <div class="pane-head">
-        <div><h2>SEASON BUDGET</h2><div class="sub">Every dollar in and out — donations, sponsorships, parts, events.</div></div>
+        <div><h2>TRANSACTIONS</h2><div class="sub">Every dollar in and out — donations, sponsorships, parts, events.</div></div>
         <button class="btn primary" id="btn-add-txn">+ Add transaction</button>
       </div>
       <div class="readonly-note" id="ledger-ro" style="display:none">Your role can view the budget but not record transactions — ask a treasurer or admin.</div>
@@ -504,9 +533,13 @@
     <section class="tabpane" id="pane-orders">
       <div class="pane-head">
         <div><h2>PURCHASE ORDERS</h2><div class="sub">Request parts, get them approved, track them to your doorstep.</div></div>
-        <button class="btn primary" id="btn-add-po">+ New purchase order</button>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn ghost" id="btn-add-po-manual">Add manually</button>
+          <a class="btn primary" id="btn-add-po" href="https://docs.google.com/forms/d/e/1FAIpQLSdshetIBCvFgAF9a_3X4Ep1y6rSGhobmxnh1RNX8fI210uDBg/viewform?usp=pp_url&amp;entry.1271011420=Madness" target="_blank" rel="noopener noreferrer">+ New purchase order ↗</a>
+        </div>
       </div>
       <div class="readonly-note" id="po-ro" style="display:none">Your role can view purchase orders but not submit them.</div>
+      <div class="readonly-note" id="form-sync-note" role="status"></div>
       <div class="filters" id="po-filters">
         <button data-f="all" class="on">Active</button>
         <button data-f="pending">Pending</button>
@@ -583,6 +616,16 @@
   </div>
 </div>
 
+<div class="overlay" id="ov-budget" role="dialog" aria-modal="true" aria-labelledby="budget-title">
+  <div class="modal">
+    <h3 id="budget-title">PLAN CATEGORY BUDGETS</h3>
+    <p class="hint">Enter planned amounts for this season. Leave a category blank if no budget has been set; enter 0 for a zero-dollar limit.</p>
+    <div class="budget-plan-fields" id="budget-fields"></div>
+    <div class="actions"><button class="btn ghost" data-close>Cancel</button><button class="btn primary" id="budget-save">Save budget</button></div>
+    <div class="err" id="budget-err" role="alert"></div>
+  </div>
+</div>
+
 <div class="overlay" id="ov-member">
   <div class="modal">
     <h3 id="member-title">ADD MEMBER</h3>
@@ -605,6 +648,8 @@
 
 <div class="toast" id="toast"></div>
 
+<script src="budget.js"></script>
+<script src="form-sync.js"></script>
 <script>
 "use strict";
 /* ---------- helpers ---------- */
@@ -617,7 +662,7 @@ const fmtUSD = new Intl.NumberFormat("en-US",{style:"currency",currency:"USD"});
 const money = cents => fmtUSD.format((cents||0)/100);
 const todayISO = () => { const d=new Date(); return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0"); };
 const fmtDate = iso => { if(!iso) return "—"; const [y,m,d]=iso.split("-").map(Number); if(!y) return esc(iso); return new Date(y,m-1,d).toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"}); };
-const parseMoney = s => { const n=parseFloat(String(s).replace(/[$,\s]/g,"")); return isFinite(n)&&n>=0 ? Math.round(n*100) : null; };
+const parseMoney = TreasuryBudget.parseMoney;
 const uid = () => "x"+Date.now().toString(36)+Math.random().toString(36).slice(2,8);
 let toastTimer=null;
 function toast(msg){ const t=$("#toast"); t.textContent=msg; t.classList.add("show"); clearTimeout(toastTimer); toastTimer=setTimeout(()=>t.classList.remove("show"),2400); }
@@ -634,10 +679,10 @@ const store = {
 /* ---------- state ---------- */
 const S = {
   db:null, me:null,
-  accounts:[], txns:[], orders:[],
-  loaded:{accounts:false,txns:false,orders:false},
+  accounts:[], txns:[], orders:[], budgets:[], integrations:[],
+  loaded:{accounts:false,txns:false,orders:false,budgets:false},
   txnFilter:"all", poFilter:"all",
-  pendingLogin:null,
+  pendingLogin:null, formSyncBusy:false, formSyncMessage:"", formLastChecked:null,
 };
 const ROLES = ["admin","treasurer","member"];
 const can = {
@@ -648,7 +693,7 @@ const can = {
 };
 const CATS = {
   income:["Donation","Sponsorship","Grant","Fundraiser","Reimbursement","Other"],
-  expense:["Parts","Tools","Event registration","Travel","Materials","Outreach","Other"],
+  expense:TreasuryBudget.categories,
 };
 // one primary "advance" action per phase; received = finished
 const PO_NEXT = { pending:["approved","Approve ✓"], approved:["ordered","Mark ordered"], ordered:["received","Mark received"] };
@@ -682,11 +727,24 @@ function show(id){
     renderAll();
   }, err=>toast("Budget feed error: "+err.code));
 
+  db.collection("budgets").onSnapshot(snap=>{
+    S.budgets = snap.docs.map(d=>({id:d.id, ...d.data()}));
+    S.loaded.budgets = true;
+    renderAll();
+  });
+  db.collection("integrations").onSnapshot(snap=>{
+    S.integrations = snap.docs.map(d=>({id:d.id, ...d.data()}));
+    renderAll();
+  });
+
   db.collection("orders").orderBy("createdAt","desc").limit(1000).onSnapshot(snap=>{
     S.orders = snap.docs.filter(d=>d.exists).map(d=>({id:d.id, ...d.data()}));
     S.loaded.orders = true;
     renderAll();
   }, err=>toast("Orders feed error: "+err.code));
+  syncGoogleForm();
+  setInterval(()=>{ if(!document.hidden) syncGoogleForm(); },60000);
+  addEventListener("focus",()=>syncGoogleForm());
 })();
 
 function onAccounts(){
@@ -814,6 +872,7 @@ function signIn(acct){
   $("#login-list-card").style.display="";
   show("app");
   renderAll();
+  syncGoogleForm();
 }
 function signOut(msg){
   store.del("mm_session");
@@ -854,6 +913,7 @@ function renderAll(){
   badge.textContent = t.pendCount;
   renderDash(t);
   renderLedger();
+  renderBudget();
   renderOrders();
   renderTeam();
 }
@@ -882,7 +942,7 @@ function renderDash(t){
   const feed = $("#d-feed");
   feed.innerHTML = events.length
     ? events.slice(0,10).map(e=>`<div class="row">${e.html}</div>`).join("")
-    : `<div class="hint" style="padding:14px 0">Nothing yet — record your first donation in the Budget tab.</div>`;
+    : `<div class="hint" style="padding:14px 0">Nothing yet — record your first donation in the Transactions tab.</div>`;
 }
 
 function renderLedger(){
@@ -912,7 +972,63 @@ function renderLedger(){
   armConfirmDeletes(wrap,"del-txn",id=>S.db.doc("transactions/"+id).delete().then(()=>toast("Transaction deleted")));
 }
 
+async function syncGoogleForm(){
+  const config=S.integrations.find(item=>item.id==="googleForm");
+  if(!S.me || !config?.enabled || S.formSyncBusy) return;
+  S.formSyncBusy=true; S.formSyncMessage=""; renderOrders();
+  try{
+    if(!/^[a-zA-Z0-9_-]+$/.test(config.sheetId) || !/^\d+$/.test(String(config.gid))) throw new Error("The response sheet connection is invalid.");
+    const url="https://docs.google.com/spreadsheets/d/"+config.sheetId+"/export?format=csv&gid="+config.gid;
+    const response=await fetch(url,{cache:"no-store",credentials:"omit",signal:AbortSignal.timeout(20000)});
+    if(!response.ok) throw new Error("Couldn’t read the response sheet.");
+    const responses=await TreasuryFormSync.readResponses(await response.text(),config);
+    let result={imported:0,errors:[]};
+    await S.db.atomic("import Google Form orders",data=>{
+      result=TreasuryFormSync.applyResponses(data,responses,Date.now());
+    });
+    S.formLastChecked=Date.now();
+    if(result.errors.length) S.formSyncMessage=result.errors.length+" response(s) need review. "+result.errors[0];
+    if(result.imported) toast(result.imported+" new order"+(result.imported===1?"":"s")+" imported");
+  }catch(error){
+    S.formSyncMessage="Import couldn’t finish. "+(error.message || "Check your connection and sheet access.")+" It will retry automatically.";
+  }finally{ S.formSyncBusy=false; if(S.me) renderOrders(); }
+}
+
+function renderBudget(){
+  const budget = TreasuryBudget.summarize(S.budgets, S.txns, S.orders);
+  $("#btn-edit-budget").style.display = can.ledger() ? "" : "none";
+  $("#budget-ro").style.display = can.ledger() ? "none" : "";
+  $("#b-planned").textContent = budget.configured ? money(budget.planned) : "Not set";
+  $("#b-spent").textContent = money(budget.spent);
+  $("#b-committed").textContent = money(budget.committed);
+  $("#b-remaining").textContent = budget.configured ? money(budget.remaining) : "Not set";
+  $("#b-remaining").style.color = budget.remaining<0 ? "var(--bad)" : "var(--good)";
+  const cash = totals();
+  const fundingGap = budget.planned-cash.inc;
+  $("#budget-note").textContent = !budget.configured
+    ? "No category budgets yet. Your transactions and orders are already included below."
+    : (fundingGap>0 ? "Plan exceeds recorded funds raised by "+money(fundingGap)+". " : money(-fundingGap)+" of recorded funds raised is unallocated. ")
+      + "Cash after commitments: "+money(cash.bal-budget.committed)+". Pending requests: "+money(budget.pending)+" (not yet committed).";
+  $("#budget-table-wrap").innerHTML = `<table><thead><tr><th>Category</th><th class="num">Planned</th><th class="num">Spent</th><th class="num">Committed</th><th class="num">Remaining</th><th class="num">Pending</th></tr></thead><tbody>${budget.rows.map(row=>{
+    const used = row.spent+row.committed;
+    const percent = row.planned>0 ? Math.min(100,used/row.planned*100) : used>0 ? 100 : 0;
+    const over = row.remaining!==null && row.remaining<0;
+    return `<tr><td><strong>${esc(row.category)}</strong>${row.planned!==null ? `<div class="budget-progress ${over?"over":""}" aria-hidden="true"><span style="width:${percent}%"></span></div>` : ""}</td>
+      <td class="num money">${row.planned===null?"Not set":money(row.planned)}</td><td class="num money">${money(row.spent)}</td>
+      <td class="num money">${money(row.committed)}</td><td class="num money ${over?"amt-out":""}">${row.remaining===null?"—":money(row.remaining)}${over?'<div class="hint">Over budget</div>':""}</td><td class="num money">${money(row.pending)}</td></tr>`;
+  }).join("")}</tbody></table>`;
+}
+
 function renderOrders(){
+  $("#btn-add-po-manual").style.display = can.ledger() ? "" : "none";
+  const sync = S.integrations.find(item=>item.id==="googleForm");
+  const syncNote = $("#form-sync-note");
+  if(sync && sync.enabled){
+    syncNote.textContent = "New purchase order opens the school form. New Madness submissions import as Pending. This page checks every minute while open and catches up on your next visit. "
+      + (S.formSyncBusy ? "Checking responses…" : S.formSyncMessage || (S.formLastChecked ? "Last checked: "+new Date(S.formLastChecked).toLocaleTimeString()+"." : "Ready to check responses."));
+  }else{
+    syncNote.textContent = "New purchase order opens the school form. Automatic import still needs to be connected; submissions will not appear here yet.";
+  }
   $("#btn-add-po").style.display = can.submit() ? "" : "none";
   $("#po-ro").style.display = can.submit() ? "none" : "";
   const list = S.orders
@@ -947,10 +1063,11 @@ function renderOrders(){
       ? `<a href="${esc(safeLink)}" target="_blank" rel="noopener noreferrer" style="color:var(--info)">${esc(o.vendor||"view item")} ↗</a>`
       : esc(o.vendor||"—");
     const need = o.neededBy ? ` · need by ${fmtDate(o.neededBy)}` : "";
+    const origin = o.source==="google-form" ? `<div class="hint">Google Form · ${esc(o.team||"Madness")}${o.vendorSku?" · SKU "+esc(o.vendorSku):""}</div>` : "";
     const notes = o.notes ? `<div class="meta hint" style="margin-top:3px">${esc(o.notes)}</div>` : "";
     return `<tr>
       <td><strong>${esc(o.partName)}</strong>
-          <div class="hint">${vendorHtml}${need}</div>${notes}</td>
+          <div class="hint">${vendorHtml}${need}</div>${origin}${notes}</td>
       <td class="num money">${money(o.unitCost)}</td>
       <td class="num money">${esc(String(o.qty))}</td>
       <td class="num money" style="color:var(--gold)">${money(o.totalCost)}${o.shipping?`<div class="hint money">incl. ${money(o.shipping)} ship</div>`:""}</td>
@@ -965,26 +1082,28 @@ function renderOrders(){
 
   $$("[data-po-move]",wrap).forEach(b=>b.addEventListener("click",async ()=>{
     const [id,next] = b.dataset.poMove.split(":");
-    const o = S.orders.find(x=>x.id===id);
     b.disabled = true;
     try{
-      // marking received automatically records the expense in the ledger (once)
-      const autoExpense = next==="received" && o && !o.expensed;
-      await S.db.doc("orders/"+id).update({
-        status:next, statusBy:S.me.name, statusAt:Date.now(),
-        ...(autoExpense ? {expensed:true} : {}),
+      if(!can.approve()) return;
+      await S.db.atomic("order "+id+" → "+next, data=>{
+        const order = data.orders[id];
+        if(!order) throw new Error("Order no longer exists");
+        if(order.status===next) return;
+        const allowed = PO_NEXT[order.status]?.[0]===next || (order.status==="pending" && next==="denied") || (order.status==="denied" && next==="pending");
+        if(!allowed) throw new Error("Order status changed; refresh and try again");
+        const alreadyRecorded = Object.values(data.transactions).some(t=>t.poId===id && t.type==="expense");
+        if(next==="received" && !order.expensed && !alreadyRecorded){
+          data.transactions["po_"+id] = {
+            type:"expense", amount:order.totalCost||0, category:order.category||"Parts",
+            description:"PO: "+order.partName+" ×"+order.qty,
+            date:todayISO(), enteredBy:S.me.name, enteredById:S.me.id,
+            poId:id, createdAt:Date.now(),
+          };
+        }
+        Object.assign(order, {status:next,statusBy:S.me.name,statusAt:Date.now()});
+        if(next==="received") order.expensed=true;
       });
-      if(autoExpense){
-        await S.db.collection("transactions").doc(uid()).set({
-          type:"expense", amount:o.totalCost||0, category:"Parts",
-          description:"PO: "+o.partName+" ×"+o.qty,
-          date:todayISO(), enteredBy:S.me.name, enteredById:S.me.id,
-          poId:id, createdAt:Date.now(),
-        });
-        toast(money(o.totalCost)+" deducted — order moved to Finished");
-      }else{
-        toast(next==="received" ? "Order moved to Finished" : "Order "+next);
-      }
+      toast(next==="received" ? "Order finished — expense recorded once" : "Order "+next);
     }catch(e){ toast("Couldn't update order"); b.disabled=false; }
   }));
   armConfirmDeletes(wrap,"del-po",id=>S.db.doc("orders/"+id).delete().then(()=>toast("Order deleted")));
@@ -1113,15 +1232,16 @@ $("#txn-save").addEventListener("click",async ()=>{
 /* --- PO modal --- */
 function poComputedTotal(){
   const each = parseMoney($("#po-each").value)||0;
-  const qty = Math.max(0, parseInt($("#po-qty").value,10)||0);
+  const quantity = Number($("#po-qty").value);
+  const qty = Number.isSafeInteger(quantity) && quantity>0 ? quantity : 0;
   const ship = parseMoney($("#po-ship").value)||0;
   return {each, qty, ship, total: each*qty+ship};
 }
 ["po-each","po-qty","po-ship"].forEach(id=>$("#"+id).addEventListener("input",()=>{
   $("#po-total").textContent = money(poComputedTotal().total);
 }));
-$("#btn-add-po").addEventListener("click",()=>{
-  if(!can.submit()) return;
+$("#btn-add-po-manual").addEventListener("click",()=>{
+  if(!can.ledger()) return;
   ["po-part","po-vendor","po-link","po-each","po-qty","po-ship","po-need","po-notes"].forEach(id=>$("#"+id).value="");
   $("#po-by").value = S.me.name;
   $("#po-total").textContent="$0.00"; $("#po-err").textContent="";
@@ -1129,6 +1249,7 @@ $("#btn-add-po").addEventListener("click",()=>{
   $("#po-part").focus();
 });
 $("#po-save").addEventListener("click",async ()=>{
+  if(!can.ledger()) return;
   const err=$("#po-err"); err.textContent="";
   const part=$("#po-part").value.trim();
   const vendor=$("#po-vendor").value.trim();
@@ -1139,11 +1260,12 @@ $("#po-save").addEventListener("click",async ()=>{
   if(!link){ err.textContent="Paste the purchase link for the item."; return; }
   if(!/^https?:\/\//i.test(link)) link="https://"+link;
   if(!each){ err.textContent="Enter the cost per item."; return; }
-  if(!qty){ err.textContent="Enter how many you want."; return; }
+  if(!qty){ err.textContent="Enter a positive whole-number quantity."; return; }
+  if(!Number.isSafeInteger(total)){ err.textContent="The order total is too large."; return; }
   const btn=$("#po-save"); btn.disabled=true;
   try{
     await S.db.collection("orders").doc(uid()).set({
-      partName:part, vendor, link,
+      partName:part, vendor, link, category:"Parts",
       unitCost:each, qty, shipping:ship, totalCost:total,
       requestedBy:S.me.name, requestedById:S.me.id,
       neededBy:$("#po-need").value||"", notes:$("#po-notes").value.trim(),
@@ -1152,6 +1274,42 @@ $("#po-save").addEventListener("click",async ()=>{
     closeOverlay(btn);
     toast("Purchase order submitted");
   }catch(e){ err.textContent="Couldn't save ("+(e.code||"error")+")."; }
+  btn.disabled=false;
+});
+
+/* --- category budget modal --- */
+$("#btn-edit-budget").addEventListener("click",()=>{
+  if(!can.ledger()) return;
+  $("#budget-fields").innerHTML = CATS.expense.map((category,index)=>{
+    const budget = S.budgets.find(item=>item.category===category);
+    return `<div class="field"><label for="budget-${index}">${esc(category)} ($)</label><input id="budget-${index}" data-budget-category="${esc(category)}" inputmode="decimal" placeholder="Not set" value="${budget ? (budget.amount/100).toFixed(2) : ""}"></div>`;
+  }).join("");
+  $("#budget-err").textContent="";
+  openOverlay("#ov-budget");
+  $("#budget-0").focus();
+});
+$("#budget-save").addEventListener("click",async ()=>{
+  if(!can.ledger()) return;
+  const err=$("#budget-err"); err.textContent="";
+  const entries=[];
+  for(const input of $$("[data-budget-category]")){
+    if(!input.value.trim()) continue;
+    const amount = parseMoney(input.value);
+    if(amount===null){ err.textContent="Enter a valid dollar amount for "+input.dataset.budgetCategory+" (up to 2 decimal places)."; input.focus(); return; }
+    entries.push({category:input.dataset.budgetCategory, amount});
+  }
+  if(!Number.isSafeInteger(entries.reduce((sum,budget)=>sum+budget.amount,0))){ err.textContent="The total budget is too large."; return; }
+  const btn=$("#budget-save"); btn.disabled=true;
+  try{
+    const updatedBy=S.me.name, updatedAt=Date.now();
+    await S.db.atomic("update category budgets", data=>{
+      data.budgets={};
+      for(const entry of entries){
+        data.budgets[entry.category.toLowerCase().replace(/ /g,"-")]={...entry,updatedBy,updatedAt};
+      }
+    });
+    closeOverlay(btn); toast("Category budgets saved");
+  }catch(e){ err.textContent="Couldn’t save the budget. Try again."; }
   btn.disabled=false;
 });
 

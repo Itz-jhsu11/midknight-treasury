@@ -2,8 +2,9 @@
 
 Season budget + purchase-order tracker for **FTC Team 7854 — MidKnight Madness**.
 
-- **Budget** — record money in (donations, sponsorships, grants) and money out (parts, events, travel); live team balance.
-- **Purchase orders** — part, supplier, purchase link, cost each, quantity, auto total. Flow: Pending → Approved → Ordered → Received. Marking an order **received automatically deducts it from the balance** and moves it to Finished.
+- **Budget** — planned limits by category, actual spending, approved/ordered commitments, remaining budget, and over-budget warnings. Admins and treasurers set amounts; members can view.
+- **Transactions** — record money in (donations, sponsorships, grants) and money out (parts, events, travel); live team balance.
+- **Purchase orders** — the primary button opens the school Google Form with Madness preselected. New Madness responses import automatically as Pending. Admins and treasurers can also enter orders manually. Flow: Pending → Approved → Ordered → Received. Marking an order **received automatically deducts it from the balance** and moves it to Finished.
 - **Accounts** — everyone gets their own PIN-protected account with a role: **Admin** (everything), **Treasurer** (money + approvals), **Member** (submit POs).
 
 ## How it works
@@ -35,4 +36,50 @@ Share the key privately with teammates (not in a public place). Each person past
 
 ## Development
 
-`index.html` is the whole app — edit and push to `main`, GitHub Pages redeploys automatically.
+`index.html` contains the UI and GitHub storage adapter. `budget.js` contains integer-cent budget calculations; `form-sync.js` parses and validates Google Form responses. Edit and push to `main`; GitHub Pages redeploys automatically.
+
+Run `npm ci` and `npm test` for the calculation, import, and simulated app tests. Tests use synthetic data and a mocked GitHub store; they never write live orders.
+
+
+## Google Form connection
+
+The existing response sheet is readable without signing in. Its sheet ID, tab ID,
+activation time, and processed-response markers live in the **private data repo**
+under `integrations.googleForm`; no response data or access keys are stored in this
+public site repository. This integration does not change the sheet's sharing.
+
+- When a teammate is signed in, the treasury checks the sheet on opening, on returning
+  to the page, and every 60 seconds while the page is visible. Google export caching,
+  network latency, or browser background throttling can delay a response.
+- When the treasury is closed, Google Forms continues recording submissions. The next
+  signed-in visit catches up. There is no background server or scheduled Actions job.
+- Only `Team = Madness` is imported. Mayhem and Shared do not enter this treasury.
+- Orders start **Pending**, regardless of the spreadsheet's Status column. Price is
+  cost per item; total is price × quantity. The form does not collect shipping, so
+  shipping starts at zero. Approval and receipt remain website actions.
+- Requester email appears in the private order list because the form collects email,
+  not the treasury account ID. Imported orders are managed by treasurers/admins.
+- IDs derive from the sheet, tab, submission timestamp, and requester email. Repeated
+  checks, row sorting, and concurrent browser imports do not create duplicates.
+  Deleting an imported order does not recreate it. Edits to an already imported
+  response do not change its website order. Do not change source timestamps or emails;
+  that would change response identity.
+- Ambiguous duplicate identities and invalid new rows are flagged on the Orders tab;
+  valid rows still import. Fix invalid entries in the source sheet and the next check
+  retries them. Existing responses marked as the initial baseline are not backfilled.
+- If sheet access changes or columns are renamed, Orders shows an import error and
+  keeps the existing orders. Restoring source access resumes checks. A private-source
+  integration would need a server-side authorized reader instead of this direct export.
+
+## Category budget rules
+
+The budget covers all transactions and orders in the current team data (the same
+season scope as the dashboard). No amounts are invented on setup. Blank means no
+budget is set; zero means a zero-dollar limit.
+
+`Remaining = planned − actual expenses − approved/ordered commitments`.
+Pending orders appear separately. Denied orders do not consume budget. When an order
+is received, its expense and status are saved atomically in one GitHub update and it
+moves from committed to actual spending. Expense records with a matching purchase
+order ID are not also counted as commitments. Unrecognized legacy expense categories
+are shown under Other; orders without a category use Parts.
