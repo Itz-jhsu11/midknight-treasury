@@ -41,6 +41,13 @@
     if(required.some(name=>headers.filter(header=>header===name).length!==1)){
       throw new Error("The response sheet is unavailable or its column names have changed.");
     }
+    const optionalColumns={shipping:["Shipping","Shipping Cost"],tax:["Tax","Sales Tax"],discount:["Discount"]};
+    const costColumns={};
+    for(const [key,names] of Object.entries(optionalColumns)){
+      const matches=headers.filter(header=>names.some(name=>name.toLowerCase()===header.toLowerCase()));
+      if(matches.length>1) throw new Error("Ambiguous "+key+" columns in the response sheet");
+      if(matches.length) costColumns[key]=matches[0];
+    }
     const responses=[];
     for(let index=0;index<rows.length;index++){
       const row=rows[index];
@@ -52,7 +59,7 @@
         responses.push({row:index+2,error:"Missing timestamp or requester email"}); continue;
       }
       const id=await responseId(config,timestamp,email);
-      responses.push({id,row:index+2,values:{timestamp,email,partName:value("Part Name"),qty:value("Quantity"),vendor:value("Vendor"),vendorSku:value("Vendor SKU"),link:value("Link"),price:value("Price"),notes:value("Justification")}});
+      responses.push({id,row:index+2,values:{timestamp,email,partName:value("Part Name"),qty:value("Quantity"),vendor:value("Vendor"),vendorSku:value("Vendor SKU"),link:value("Link"),price:value("Price"),notes:value("Justification"),status:value("Status"),...Object.fromEntries(Object.entries(costColumns).map(([key,column])=>[key,value(column)]))}});
     }
     // The sheet exposes timestamps at second precision. Ambiguous identities need
     // review instead of silently dropping or duplicating a purchase request.
@@ -61,44 +68,91 @@
     for(const response of responses) if(counts.get(response.id)>1) response.error="Two responses share the same timestamp and requester";
     return responses;
   }
-  function toOrder(response,now){
+  function sourceStatus(value){
+    const text=String(value||"").trim().toLowerCase();
+    if(["received","delivered","finished"].includes(text)) return "received";
+    if(["ordered","purchased"].includes(text)) return "ordered";
+    if(text==="approved") return "approved";
+    if(["denied","rejected","cancelled","canceled"].includes(text)) return "denied";
+    if(text==="pending" || text.startsWith("on hold")) return "pending";
+    return null;
+  }
+  function toOrder(response,now,existing={}){
     const value=response.values;
     if(response.error) throw new Error(response.error);
     const unitCost=budget.parseMoney(value.price);
     const qty=/^\d+$/.test(value.qty) ? Number(value.qty) : NaN;
     if(unitCost===null || unitCost<=0) throw new Error("Price must be a positive dollar amount with up to 2 decimal places");
-    if(!Number.isSafeInteger(qty) || qty<=0) throw new Error("Quantity must be a positive whole number");
-    if(!Number.isSafeInteger(unitCost*qty)) throw new Error("Order total is too large");
+    const extras={},sourceCostFields=[];
+    for(const key of ["shipping","tax","discount"]){
+      if(Object.hasOwn(value,key)){
+        sourceCostFields.push(key);
+        extras[key]=value[key]==="" ? 0 : budget.parseMoney(value[key]);
+        if(extras[key]===null) throw new Error("Invalid "+key+" amount");
+      }else extras[key]=existing[key] || 0;
+    }
+    const costs=budget.calculateOrderCost({unitCost,qty,...extras});
     if(!value.partName || !value.vendor) throw new Error("Part name and vendor are required");
-    let link;
-    try{link=new URL(value.link);}catch{throw new Error("A full purchase link is required");}
-    if(!["https:","http:"].includes(link.protocol)) throw new Error("Purchase link must use https or http");
+    // A missing product link must not hide a real purchase or its expense.
+    let link="";
+    try{
+      const candidate=new URL(value.link);
+      if(["https:","http:"].includes(candidate.protocol)) link=candidate.href;
+    }catch{}
     if(Object.values(value).some(text=>text.length>5000)) throw new Error("A response field is too long");
-    return {partName:value.partName,vendor:value.vendor,vendorSku:value.vendorSku,link:link.href,
-      unitCost,qty,shipping:0,totalCost:unitCost*qty,category:"Parts",team:"Madness",
-      requestedBy:value.email,requestedById:"",neededBy:"",notes:value.notes,
-      status:"pending",expensed:false,createdAt:now,submittedAt:value.timestamp,
-      source:"google-form",sourceResponseId:response.id};
+    return {...existing,partName:value.partName,vendor:value.vendor,vendorSku:value.vendorSku,link,linkNeedsReview:!link,
+      unitCost,qty,...extras,...costs,category:existing.category||"Parts",team:"Madness",
+      requestedBy:value.email,requestedById:existing.requestedById||"",neededBy:existing.neededBy||"",notes:value.notes,
+      status:existing.status||"pending",expensed:existing.expensed||false,createdAt:existing.createdAt||now,submittedAt:value.timestamp,
+      source:"google-form",sourceResponseId:response.id,sourceStatus:value.status||"",sourceCostFields,
+      costsReviewed:existing.costsReviewed || (sourceCostFields.includes("shipping") && sourceCostFields.includes("tax"))};
   }
   function applyResponses(data,responses,now){
     const config=data.integrations?.googleForm;
-    if(!config?.enabled) return {imported:0,errors:[]};
+    if(!config?.enabled) return {imported:0,updated:0,expenses:0,errors:[]};
     config.seen = config.seen || {};
     data.orders = data.orders || {};
-    let imported=0;const errors=[];
+    let imported=0,updated=0,expenses=0;const errors=[];
     for(const response of responses){
-      if(response.id && (config.seen[response.id] || data.orders[response.id])) continue;
+      const existing=response.id ? data.orders[response.id] : null;
+      const backfill=(config.backfillIds || []).includes(response.id);
+      if(response.id && config.seen[response.id] && !existing && !backfill) continue;
       try{
-        const order=toOrder(response,now);
+        const order=toOrder(response,now,existing||{});
+        const linkedExpense=Object.values(data.transactions || {}).some(item=>item.poId===response.id && item.type==="expense");
+        if(config.syncStatuses && (!existing || !existing.sourceStatusSyncEnabled || existing.sourceStatus!==order.sourceStatus)){
+          const status=sourceStatus(order.sourceStatus);
+          if(status && status!==order.status){
+            if((order.expensed || linkedExpense) && status!=="received"){
+              order.sourceStatusConflict=true;
+            }else{
+              order.status=status;order.statusBy="Google Form sync";order.statusAt=now;
+              order.sourceStatusConflict=false;
+            }
+          }else if(status===order.status){order.sourceStatusConflict=false;}
+        }
+        order.sourceStatusSyncEnabled=!!config.syncStatuses;
+        if(order.sourceStatusConflict) errors.push("Row "+response.row+": spreadsheet status conflicts with a recorded expense; review it in the treasury.");
+        // Stage the expense so validation failure never commits half an order.
+        const staged={transactions:data.transactions || {}};
+        let expenseChanged=false;
+        if(order.status==="received" || order.expensed || linkedExpense){
+          expenseChanged=budget.recordOrderExpense(staged,response.id,order,{name:"Google Form sync",id:"google-form"},now);
+          order.expensed=true;
+        }
+        if(!existing) imported++;
+        else if(JSON.stringify(existing)!==JSON.stringify(order)) updated++;
         data.orders[response.id]=order;
+        if(expenseChanged){data.transactions=staged.transactions;expenses++;}
         config.seen[response.id]=true;
-        imported++;
-      }catch(error){ errors.push("Row "+response.row+": "+error.message+"."); }
+        if(backfill) config.backfillIds=config.backfillIds.filter(id=>id!==response.id);
+      }catch(error){errors.push("Row "+response.row+": "+error.message+".");}
     }
     if(imported) config.lastImportedAt=now;
-    return {imported,errors};
+    if(imported || updated || expenses) config.lastReconciledAt=now;
+    return {imported,updated,expenses,errors};
   }
-  const api={parseCSV,responseId,readResponses,toOrder,applyResponses};
+  const api={parseCSV,responseId,readResponses,sourceStatus,toOrder,applyResponses};
   if(typeof module!=="undefined" && module.exports) module.exports=api;
   else root.TreasuryFormSync=api;
 })(typeof window!=="undefined" ? window : globalThis);

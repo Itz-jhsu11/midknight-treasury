@@ -534,6 +534,7 @@
       <div class="pane-head">
         <div><h2>PURCHASE ORDERS</h2><div class="sub">Request parts, get them approved, track them to your doorstep.</div></div>
         <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn ghost" id="btn-sync-po">Refresh orders</button>
           <button class="btn ghost" id="btn-add-po-manual">Add manually</button>
           <a class="btn primary" id="btn-add-po" href="https://docs.google.com/forms/d/e/1FAIpQLSdshetIBCvFgAF9a_3X4Ep1y6rSGhobmxnh1RNX8fI210uDBg/viewform?usp=pp_url&amp;entry.1271011420=Madness" target="_blank" rel="noopener noreferrer">+ New purchase order ↗</a>
         </div>
@@ -601,7 +602,11 @@
       <div class="field"><label for="po-each">Cost each ($)</label><input id="po-each" inputmode="decimal" placeholder="0.00"></div>
       <div class="field"><label for="po-qty">Amount wanted</label><input id="po-qty" inputmode="numeric" placeholder="1"></div>
     </div>
-    <div class="field"><label for="po-ship">Shipping / tax estimate ($, optional)</label><input id="po-ship" inputmode="decimal" placeholder="0.00"></div>
+    <div class="grid2">
+      <div class="field"><label for="po-ship">Shipping ($, optional)</label><input id="po-ship" inputmode="decimal" placeholder="0.00"></div>
+      <div class="field"><label for="po-tax">Tax ($, optional)</label><input id="po-tax" inputmode="decimal" placeholder="0.00"></div>
+    </div>
+    <div class="field"><label for="po-discount">Discount on this order ($, optional)</label><input id="po-discount" inputmode="decimal" placeholder="0.00"></div>
     <div class="total-line"><span class="hint">Total cost</span><span class="money" id="po-total">$0.00</span></div>
     <div class="grid2">
       <div class="field"><label for="po-by">Person ordering</label><input id="po-by" readonly style="opacity:.65;cursor:not-allowed" title="Locked to your account"></div>
@@ -613,6 +618,23 @@
       <button class="btn primary" id="po-save">Submit order</button>
     </div>
     <div class="err" id="po-err"></div>
+  </div>
+</div>
+
+<div class="overlay" id="ov-order-costs" role="dialog" aria-modal="true" aria-labelledby="order-cost-title">
+  <div class="modal">
+    <h3 id="order-cost-title">ORDER COSTS</h3>
+    <p id="order-cost-summary" class="hint"></p>
+    <div class="grid2">
+      <div class="field"><label for="order-shipping">Shipping ($)</label><input id="order-shipping" inputmode="decimal" placeholder="0.00"></div>
+      <div class="field"><label for="order-tax">Tax ($)</label><input id="order-tax" inputmode="decimal" placeholder="0.00"></div>
+    </div>
+    <div class="field"><label for="order-discount">Discount on this order ($)</label><input id="order-discount" inputmode="decimal" placeholder="0.00"></div>
+    <div class="field"><label for="order-category">Budget category</label><select id="order-category"></select></div>
+    <p class="hint">Total = price × quantity + shipping + tax − discount. Enter charges for this order only, once. Fields supplied by the sheet are read-only here. Changes also update a linked expense.</p>
+    <div class="total-line"><span>Total</span><span class="money" id="order-cost-total"></span></div>
+    <div class="actions"><button class="btn ghost" data-close>Cancel</button><button class="btn primary" id="order-cost-save">Save costs</button></div>
+    <div class="err" id="order-cost-err" role="alert"></div>
   </div>
 </div>
 
@@ -982,17 +1004,18 @@ async function syncGoogleForm(){
     const response=await fetch(url,{cache:"no-store",credentials:"omit",signal:AbortSignal.timeout(20000)});
     if(!response.ok) throw new Error("Couldn’t read the response sheet.");
     const responses=await TreasuryFormSync.readResponses(await response.text(),config);
-    let result={imported:0,errors:[]};
+    let result={imported:0,updated:0,expenses:0,errors:[]};
     await S.db.atomic("import Google Form orders",data=>{
       result=TreasuryFormSync.applyResponses(data,responses,Date.now());
     });
     S.formLastChecked=Date.now();
     if(result.errors.length) S.formSyncMessage=result.errors.length+" response(s) need review. "+result.errors[0];
-    if(result.imported) toast(result.imported+" new order"+(result.imported===1?"":"s")+" imported");
+    if(result.imported || result.updated || result.expenses) toast(result.imported+" new · "+result.updated+" updated · "+result.expenses+" expense updates");
   }catch(error){
     S.formSyncMessage="Import couldn’t finish. "+(error.message || "Check your connection and sheet access.")+" It will retry automatically.";
   }finally{ S.formSyncBusy=false; if(S.me) renderOrders(); }
 }
+$("#btn-sync-po").addEventListener("click",()=>syncGoogleForm());
 
 function renderBudget(){
   const budget = TreasuryBudget.summarize(S.budgets, S.txns, S.orders);
@@ -1024,11 +1047,12 @@ function renderOrders(){
   const sync = S.integrations.find(item=>item.id==="googleForm");
   const syncNote = $("#form-sync-note");
   if(sync && sync.enabled){
-    syncNote.textContent = "New purchase order opens the school form. New Madness submissions import as Pending. This page checks every minute while open and catches up on your next visit. "
+    syncNote.textContent = "Madness orders and their costs update from the sheet. "+(sync.syncStatuses ? "Ordered items are committed funds; received items are recorded as expenses. " : "Approval and receipt are managed here. ")+"Checks run every minute while open and catch up on your next visit. "
       + (S.formSyncBusy ? "Checking responses…" : S.formSyncMessage || (S.formLastChecked ? "Last checked: "+new Date(S.formLastChecked).toLocaleTimeString()+"." : "Ready to check responses."));
   }else{
     syncNote.textContent = "New purchase order opens the school form. Automatic import still needs to be connected; submissions will not appear here yet.";
   }
+  $("#btn-sync-po").disabled = S.formSyncBusy || !sync?.enabled;
   $("#btn-add-po").style.display = can.submit() ? "" : "none";
   $("#po-ro").style.display = can.submit() ? "none" : "";
   const list = S.orders
@@ -1054,6 +1078,7 @@ function renderOrders(){
       if(o.status==="pending") acts.push(`<button class="btn small danger ghost" data-po-move="${esc(o.id)}:denied">Deny</button>`);
       if(o.status==="denied") acts.push(`<button class="btn small ghost" data-po-move="${esc(o.id)}:pending">Reopen</button>`);
     }
+    if(can.ledger()) acts.push(`<button class="btn small" data-po-costs="${esc(o.id)}">Adjust costs</button>`);
     const mine = S.me && o.requestedById===S.me.id;
     if((can.team()) || (mine && o.status==="pending")){
       acts.push(`<button class="btn small danger ghost" data-del-po="${esc(o.id)}" title="Delete order">✕</button>`);
@@ -1064,15 +1089,18 @@ function renderOrders(){
       : esc(o.vendor||"—");
     const need = o.neededBy ? ` · need by ${fmtDate(o.neededBy)}` : "";
     const origin = o.source==="google-form" ? `<div class="hint">Google Form · ${esc(o.team||"Madness")}${o.vendorSku?" · SKU "+esc(o.vendorSku):""}</div>` : "";
+    const costDetails = [o.shipping?money(o.shipping)+" shipping":"",o.tax?money(o.tax)+" tax":"",o.discount?"−"+money(o.discount)+" discount":""].filter(Boolean).join(" · ");
+    const costHint = o.source==="google-form" && !o.costsReviewed ? "Additional costs unconfirmed" : "";
+    const sourceWarnings = (o.linkNeedsReview ? '<div class="hint">Purchase link unavailable</div>' : "") + (o.sourceStatusConflict ? '<div class="err">Sheet status conflicts with a recorded expense</div>' : "");
     const notes = o.notes ? `<div class="meta hint" style="margin-top:3px">${esc(o.notes)}</div>` : "";
     return `<tr>
       <td><strong>${esc(o.partName)}</strong>
-          <div class="hint">${vendorHtml}${need}</div>${origin}${notes}</td>
+          <div class="hint">${vendorHtml}${need}</div>${origin}${notes}${sourceWarnings}</td>
       <td class="num money">${money(o.unitCost)}</td>
       <td class="num money">${esc(String(o.qty))}</td>
-      <td class="num money" style="color:var(--gold)">${money(o.totalCost)}${o.shipping?`<div class="hint money">incl. ${money(o.shipping)} ship</div>`:""}</td>
+      <td class="num money" style="color:var(--gold)">${money(o.totalCost)}${costDetails?`<div class="hint">${costDetails}</div>`:""}${costHint?`<div class="hint">${costHint}</div>`:""}</td>
       <td>${esc(o.requestedBy||"—")}</td>
-      <td><span class="pill ${esc(o.status)}">${o.status==="received"?"finished":esc(o.status)}</span>${o.expensed?`<div class="hint" style="margin-top:3px">in ledger</div>`:""}</td>
+      <td><span class="pill ${esc(o.status)}">${o.status==="received"?"finished":esc(o.status)}</span>${o.expensed?`<div class="hint" style="margin-top:3px">in ledger</div>`:""}${o.sourceStatus?`<div class="hint">Sheet: ${esc(o.sourceStatus)}</div>`:""}</td>
       <td class="num" style="white-space:nowrap"><div style="display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap">${acts.join("")}</div></td>
     </tr>`;
   }).join("");
@@ -1080,6 +1108,7 @@ function renderOrders(){
     <thead><tr><th>Part</th><th class="num">Cost each</th><th class="num">Qty</th><th class="num">Total</th><th>Ordered by</th><th>Status</th><th></th></tr></thead>
     <tbody>${rows}</tbody></table>`;
 
+  $$("[data-po-costs]",wrap).forEach(button=>button.addEventListener("click",()=>openOrderCosts(button.dataset.poCosts)));
   $$("[data-po-move]",wrap).forEach(b=>b.addEventListener("click",async ()=>{
     const [id,next] = b.dataset.poMove.split(":");
     b.disabled = true;
@@ -1091,15 +1120,7 @@ function renderOrders(){
         if(order.status===next) return;
         const allowed = PO_NEXT[order.status]?.[0]===next || (order.status==="pending" && next==="denied") || (order.status==="denied" && next==="pending");
         if(!allowed) throw new Error("Order status changed; refresh and try again");
-        const alreadyRecorded = Object.values(data.transactions).some(t=>t.poId===id && t.type==="expense");
-        if(next==="received" && !order.expensed && !alreadyRecorded){
-          data.transactions["po_"+id] = {
-            type:"expense", amount:order.totalCost||0, category:order.category||"Parts",
-            description:"PO: "+order.partName+" ×"+order.qty,
-            date:todayISO(), enteredBy:S.me.name, enteredById:S.me.id,
-            poId:id, createdAt:Date.now(),
-          };
-        }
+        if(next==="received") TreasuryBudget.recordOrderExpense(data,id,order,{name:S.me.name,id:S.me.id,date:todayISO()},Date.now());
         Object.assign(order, {status:next,statusBy:S.me.name,statusAt:Date.now()});
         if(next==="received") order.expensed=true;
       });
@@ -1231,18 +1252,21 @@ $("#txn-save").addEventListener("click",async ()=>{
 
 /* --- PO modal --- */
 function poComputedTotal(){
-  const each = parseMoney($("#po-each").value)||0;
-  const quantity = Number($("#po-qty").value);
-  const qty = Number.isSafeInteger(quantity) && quantity>0 ? quantity : 0;
-  const ship = parseMoney($("#po-ship").value)||0;
-  return {each, qty, ship, total: each*qty+ship};
+  const each=parseMoney($("#po-each").value);
+  const qty=Number($("#po-qty").value);
+  const extras={};
+  for(const [key,id] of Object.entries({shipping:"po-ship",tax:"po-tax",discount:"po-discount"})){
+    extras[key]=$("#"+id).value.trim() ? parseMoney($("#"+id).value) : 0;
+  }
+  const costs=TreasuryBudget.calculateOrderCost({unitCost:each,qty,...extras});
+  return {each,qty,ship:extras.shipping,tax:extras.tax,discount:extras.discount,total:costs.totalCost,subtotal:costs.subtotal};
 }
-["po-each","po-qty","po-ship"].forEach(id=>$("#"+id).addEventListener("input",()=>{
-  $("#po-total").textContent = money(poComputedTotal().total);
+["po-each","po-qty","po-ship","po-tax","po-discount"].forEach(id=>$("#"+id).addEventListener("input",()=>{
+  try{$("#po-total").textContent=money(poComputedTotal().total);}catch{$("#po-total").textContent="—";}
 }));
 $("#btn-add-po-manual").addEventListener("click",()=>{
   if(!can.ledger()) return;
-  ["po-part","po-vendor","po-link","po-each","po-qty","po-ship","po-need","po-notes"].forEach(id=>$("#"+id).value="");
+  ["po-part","po-vendor","po-link","po-each","po-qty","po-ship","po-tax","po-discount","po-need","po-notes"].forEach(id=>$("#"+id).value="");
   $("#po-by").value = S.me.name;
   $("#po-total").textContent="$0.00"; $("#po-err").textContent="";
   openOverlay("#ov-po");
@@ -1253,7 +1277,9 @@ $("#po-save").addEventListener("click",async ()=>{
   const err=$("#po-err"); err.textContent="";
   const part=$("#po-part").value.trim();
   const vendor=$("#po-vendor").value.trim();
-  const {each,qty,ship,total}=poComputedTotal();
+  let costs;
+  try{costs=poComputedTotal();}catch(e){err.textContent=e.message;return;}
+  const {each,qty,ship,tax,discount,total,subtotal}=costs;
   if(!part){ err.textContent="Enter the part name."; return; }
   if(!vendor){ err.textContent="Enter the supplier (Amazon, goBILDA, …)."; return; }
   let link=$("#po-link").value.trim();
@@ -1266,7 +1292,7 @@ $("#po-save").addEventListener("click",async ()=>{
   try{
     await S.db.collection("orders").doc(uid()).set({
       partName:part, vendor, link, category:"Parts",
-      unitCost:each, qty, shipping:ship, totalCost:total,
+      unitCost:each, qty, shipping:ship, tax, discount, subtotal, totalCost:total, costsReviewed:true,
       requestedBy:S.me.name, requestedById:S.me.id,
       neededBy:$("#po-need").value||"", notes:$("#po-notes").value.trim(),
       status:"pending", expensed:false, createdAt:Date.now(),
@@ -1274,6 +1300,54 @@ $("#po-save").addEventListener("click",async ()=>{
     closeOverlay(btn);
     toast("Purchase order submitted");
   }catch(e){ err.textContent="Couldn't save ("+(e.code||"error")+")."; }
+  btn.disabled=false;
+});
+
+/* --- per-order charges --- */
+let costEditing=null;
+function costInputs(order){
+  const extras={};
+  for(const key of ["shipping","tax","discount"]){
+    const input=$("#order-"+key);
+    extras[key]=(order.sourceCostFields||[]).includes(key) ? (order[key]||0) : input.value.trim() ? parseMoney(input.value) : 0;
+  }
+  return {...extras,...TreasuryBudget.calculateOrderCost({unitCost:order.unitCost,qty:order.qty,...extras})};
+}
+function previewOrderCosts(){
+  const order=S.orders.find(item=>item.id===costEditing);
+  if(!order) return;
+  try{$("#order-cost-total").textContent=money(costInputs(order).totalCost);$("#order-cost-err").textContent="";}
+  catch(e){$("#order-cost-total").textContent="—";$("#order-cost-err").textContent=e.message;}
+}
+function openOrderCosts(id){
+  if(!can.ledger()) return;
+  const order=S.orders.find(item=>item.id===id);if(!order)return;
+  costEditing=id;
+  $("#order-cost-summary").textContent=order.partName+" · "+money(order.unitCost)+" × "+order.qty+" = "+money(order.unitCost*order.qty);
+  for(const key of ["shipping","tax","discount"]){
+    $("#order-"+key).value=((order[key]||0)/100).toFixed(2);
+    $("#order-"+key).disabled=(order.sourceCostFields||[]).includes(key);
+  }
+  $("#order-category").innerHTML=CATS.expense.map(category=>`<option ${category===(order.category||"Parts")?"selected":""}>${esc(category)}</option>`).join("");
+  previewOrderCosts();openOverlay("#ov-order-costs");
+}
+["shipping","tax","discount"].forEach(key=>$("#order-"+key).addEventListener("input",previewOrderCosts));
+$("#order-cost-save").addEventListener("click",async()=>{
+  if(!can.ledger() || !costEditing)return;
+  const btn=$("#order-cost-save");btn.disabled=true;
+  try{
+    const id=costEditing,category=$("#order-category").value;
+    if(!CATS.expense.includes(category))throw new Error("Select a budget category");
+    const actor={name:S.me.name,id:S.me.id,date:todayISO()},now=Date.now();
+    await S.db.atomic("adjust order costs "+id,data=>{
+      const existing=data.orders[id];if(!existing)throw new Error("Order no longer exists");
+      const order={...existing,...costInputs(existing),category,costsReviewed:true,costUpdatedAt:now,costUpdatedBy:actor.name};
+      const linked=Object.values(data.transactions||{}).some(item=>item.poId===id && item.type==="expense");
+      if(order.status==="received" || order.expensed || linked){TreasuryBudget.recordOrderExpense(data,id,order,actor,now);order.expensed=true;}
+      data.orders[id]=order;
+    });
+    closeOverlay(btn);toast("Order costs and budget updated");
+  }catch(e){$("#order-cost-err").textContent=e.message || "Couldn’t save costs.";}
   btn.disabled=false;
 });
 

@@ -81,5 +81,70 @@ test('duplicate identities fail safely, and changed headers cannot silently clea
   assert.equal(result.imported,0);assert.equal(result.errors.length,2);
   await assert.rejects(sync.readResponses('<html>Sign in</html>',config),/unavailable/);
   const unsafe=await sync.readResponses([headers,line().replace('https://example.test/wheel','javascript:alert(1)')].join('\n'),config);
-  assert.equal(sync.applyResponses({integrations:{googleForm:structuredClone(config)}},unsafe,1).imported,0);
+  const safeData={integrations:{googleForm:structuredClone(config)}};
+  assert.equal(sync.applyResponses(safeData,unsafe,1).imported,1);
+  assert.equal(Object.values(safeData.orders)[0].link,'');
+  assert.equal(Object.values(safeData.orders)[0].linkNeedsReview,true);
+});
+
+test('calculates unit price times packs, with order-level shipping, tax, and discount exactly once',()=>{
+  assert.deepEqual(budget.calculateOrderCost({unitCost:590,qty:15,shipping:799,tax:708,discount:500}),{subtotal:8850,totalCost:9857});
+  assert.deepEqual(budget.calculateOrderCost({unitCost:10,qty:3,tax:2}),{subtotal:30,totalCost:32});
+  assert.throws(()=>budget.calculateOrderCost({unitCost:100,qty:1,discount:101}),/Discount/);
+  assert.throws(()=>budget.calculateOrderCost({unitCost:Number.MAX_SAFE_INTEGER,qty:2}),/large/);
+  assert.throws(()=>budget.calculateOrderCost({unitCost:100,qty:1,tax:-1}),/tax/);
+});
+
+test('backfills selected existing rows, follows statuses, and records each received expense once',async()=>{
+  const csv=[headers,line().replace('Robot,Ordered','Robot,RECEIVED'),line('Madness','9/22/2026 13:00:00')].join('\n');
+  const rows=await sync.readResponses(csv,config);
+  const data={integrations:{googleForm:{...structuredClone(config),syncStatuses:true,seen:{[rows[0].id]:true},backfillIds:[rows[0].id]}},transactions:{unrelated:{type:'expense',amount:99}}};
+  const result=sync.applyResponses(data,rows,1791000000000);
+  assert.equal(result.imported,2);assert.equal(result.expenses,1);
+  assert.equal(data.orders[rows[0].id].status,'received');assert.equal(data.orders[rows[1].id].status,'ordered');
+  assert.equal(data.transactions['po_'+rows[0].id].amount,2500);
+  const snapshot=JSON.stringify(data);
+  assert.deepEqual(sync.applyResponses(data,rows,1791000100000),{imported:0,updated:0,expenses:0,errors:[]});
+  assert.equal(JSON.stringify(data),snapshot);
+  assert.equal(data.transactions.unrelated.amount,99);assert.deepEqual(data.integrations.googleForm.backfillIds,[]);
+});
+
+test('source price and quantity corrections update the same expense and preserve entered extra charges',async()=>{
+  const original=await sync.readResponses([headers,line().replace('Robot,Ordered','Robot,RECEIVED')].join('\n'),config);
+  const data={integrations:{googleForm:{...structuredClone(config),syncStatuses:true}}};
+  sync.applyResponses(data,original,1791000000000);
+  const id=original[0].id;
+  Object.assign(data.orders[id],{shipping:1000,tax:150,discount:200,costsReviewed:true,category:'Tools'});
+  const revised=await sync.readResponses([headers,line('Madness','9/21/2026 12:00:00','11.25','3').replace('Robot,Ordered','Robot,RECEIVED')].join('\n'),config);
+  assert.equal(sync.applyResponses(data,revised,1791000100000).expenses,1);
+  assert.equal(data.orders[id].totalCost,4325);assert.equal(data.transactions['po_'+id].amount,4325);
+  assert.equal(data.transactions['po_'+id].category,'Tools');assert.equal(Object.keys(data.transactions).length,1);
+  assert.equal(data.transactions['po_'+id].createdAt,1791000000000);
+});
+
+test('optional sheet charges override app charges and reject ambiguous or invalid amounts',async()=>{
+  const rows=await sync.readResponses([headers+',Shipping,Tax,Discount',line()+',5.00,2.50,3.00'].join('\n'),config);
+  const order=sync.toOrder(rows[0],1,{shipping:9999});
+  assert.equal(order.totalCost,2950);assert.deepEqual(order.sourceCostFields,['shipping','tax','discount']);assert.equal(order.costsReviewed,true);
+  await assert.rejects(sync.readResponses(headers+',Shipping,Shipping Cost\n'+line()+',1,2',config),/Ambiguous/);
+  const invalid=await sync.readResponses(headers+',Tax\n'+line()+',8%',config);
+  assert.throws(()=>sync.toOrder(invalid[0],1),/tax/);
+});
+
+test('on hold stays pending; a changed status cannot erase a recorded expense',async()=>{
+  const data={integrations:{googleForm:{...structuredClone(config),syncStatuses:true}}};
+  const received=await sync.readResponses(headers+'\n'+line().replace('Robot,Ordered','Robot,RECEIVED'),config);
+  sync.applyResponses(data,received,1791000000000);
+  const onHold=await sync.readResponses(headers+'\n'+line().replace('Robot,Ordered','Robot,ON HOLD Must justify'),config);
+  const result=sync.applyResponses(data,onHold,1791000100000);
+  assert.equal(result.errors.length,1);assert.equal(data.orders[received[0].id].status,'received');
+  assert.equal(data.transactions['po_'+received[0].id].amount,2500);
+  assert.equal(sync.sourceStatus('ON HOLD Must justify'),'pending');assert.equal(sync.sourceStatus('Purchased'),'ordered');
+});
+
+test('duplicate expenses block a row update without partially changing its order',async()=>{
+  const rows=await sync.readResponses(headers+'\n'+line().replace('Robot,Ordered','Robot,RECEIVED'),config);
+  const id=rows[0].id,data={integrations:{googleForm:{...structuredClone(config),syncStatuses:true}},orders:{},transactions:{a:{type:'expense',poId:id,amount:1},b:{type:'expense',poId:id,amount:2}}};
+  const result=sync.applyResponses(data,rows,1791000000000);
+  assert.match(result.errors[0],/Multiple expenses/);assert.equal(data.orders[id],undefined);assert.equal(data.transactions.a.amount,1);
 });

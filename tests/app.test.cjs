@@ -100,3 +100,31 @@ test('members can view budgets and open the form but cannot edit allocations or 
     assert.equal(d.querySelector('#ov-budget').classList.contains('open'),false);
   }finally{app.close();}
 });
+
+test('adjusting charges updates total, category budget, and the existing expense together',async()=>{
+  const app=await fixture();try{
+    await app.window.eval('S.db.doc("orders/charges").set({partName:"Parts pack",vendor:"Vendor",qty:3,unitCost:1250,totalCost:3750,status:"received",expensed:false})');
+    const d=app.window.document;
+    d.querySelector('[data-f="finished"]').click();
+    d.querySelector('[data-po-costs="charges"]').click();
+    d.querySelector('#order-shipping').value='5.25';d.querySelector('#order-tax').value='3.00';d.querySelector('#order-discount').value='2.00';
+    d.querySelector('#order-tax').dispatchEvent(new app.window.Event('input'));
+    assert.equal(d.querySelector('#order-cost-total').textContent,'$43.75');
+    d.querySelector('#order-category').value='Tools';d.querySelector('#order-cost-save').click();await wait(40);
+    assert.equal(app.data.orders.charges.totalCost,4375);assert.equal(app.data.transactions.po_charges.amount,4375);
+    assert.equal(app.data.transactions.po_charges.category,'Tools');
+    d.querySelector('[data-po-costs="charges"]').click();d.querySelector('#order-shipping').value='7.25';d.querySelector('#order-cost-save').click();await wait(40);
+    assert.equal(app.data.transactions.po_charges.amount,4575);assert.equal(Object.keys(app.data.transactions).length,1);
+    assert.deepEqual(app.errors,[]);
+  }finally{app.close();}
+});
+
+test('invalid charges do not write an order or an expense',async()=>{
+  const app=await fixture();try{
+    await app.window.eval('S.db.doc("orders/charges").set({partName:"Parts",qty:1,unitCost:100,totalCost:100,status:"ordered"})');
+    const count=app.puts,d=app.window.document;
+    d.querySelector('[data-po-costs="charges"]').click();d.querySelector('#order-discount').value='500';d.querySelector('#order-cost-save').click();await wait(30);
+    assert.equal(app.puts,count);assert.equal(app.data.orders.charges.totalCost,100);assert.equal(Object.keys(app.data.transactions).length,0);
+    assert.match(d.querySelector('#order-cost-err').textContent,/Discount/);
+  }finally{app.close();}
+});
