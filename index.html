@@ -482,6 +482,7 @@
   </nav>
 
   <main>
+    <p class="hint">Order totals, spending, and balances include estimated tax where invoice tax is unconfirmed.</p>
     <!-- dashboard -->
     <section class="tabpane on" id="pane-dash">
       <div class="stat-row">
@@ -505,7 +506,7 @@
       <div class="readonly-note" id="budget-ro" style="display:none">Everyone can view the budget. A treasurer or admin can set category amounts.</div>
       <div class="stat-row">
         <div class="stat gold"><div class="lbl">Planned budget</div><div class="val money" id="b-planned">—</div><div class="note">Across all categories</div></div>
-        <div class="stat bad"><div class="lbl">Actual spending</div><div class="val money" id="b-spent">$0.00</div><div class="note">Expenses recorded in transactions</div></div>
+        <div class="stat bad"><div class="lbl">Recorded spending</div><div class="val money" id="b-spent">$0.00</div><div class="note">Expenses recorded in transactions</div></div>
         <div class="stat info"><div class="lbl">Committed</div><div class="val money" id="b-committed">$0.00</div><div class="note">Approved and ordered, not yet expensed</div></div>
         <div class="stat good"><div class="lbl">Budget remaining</div><div class="val money" id="b-remaining">—</div><div class="note">Planned − spent − committed</div></div>
       </div>
@@ -604,7 +605,7 @@
     </div>
     <div class="grid2">
       <div class="field"><label for="po-ship">Shipping ($, optional)</label><input id="po-ship" inputmode="decimal" placeholder="0.00"></div>
-      <div class="field"><label for="po-tax">Tax ($, optional)</label><input id="po-tax" inputmode="decimal" placeholder="0.00"></div>
+      <div class="field"><label for="po-tax">Invoice tax ($, leave blank to estimate)</label><input id="po-tax" inputmode="decimal" placeholder="Automatic estimate"></div>
     </div>
     <div class="field"><label for="po-discount">Discount on this order ($, optional)</label><input id="po-discount" inputmode="decimal" placeholder="0.00"></div>
     <div class="total-line"><span class="hint">Total cost</span><span class="money" id="po-total">$0.00</span></div>
@@ -629,6 +630,11 @@
       <div class="field"><label for="order-shipping">Shipping ($)</label><input id="order-shipping" inputmode="decimal" placeholder="0.00"></div>
       <div class="field"><label for="order-tax">Tax ($)</label><input id="order-tax" inputmode="decimal" placeholder="0.00"></div>
     </div>
+    <div class="grid2">
+      <div class="field"><label for="order-tax-mode">Tax amount</label><select id="order-tax-mode"><option value="estimate">Estimate automatically</option><option value="manual">Confirmed invoice amount</option><option value="sheet" hidden>Confirmed amount from sheet</option></select></div>
+      <div class="field"><label for="order-tax-treatment">Item tax treatment</label><select id="order-tax-treatment"><option value="taxable">Taxable goods</option><option value="non-taxable">Non-taxable / exempt</option></select></div>
+    </div>
+    <p class="hint" id="order-tax-note"></p>
     <div class="field"><label for="order-discount">Discount on this order ($)</label><input id="order-discount" inputmode="decimal" placeholder="0.00"></div>
     <div class="field"><label for="order-category">Budget category</label><select id="order-category"></select></div>
     <p class="hint">Total = price × quantity + shipping + tax − discount. Enter charges for this order only, once. Fields supplied by the sheet are read-only here. Changes also update a linked expense.</p>
@@ -982,7 +988,7 @@ function renderLedger(){
   const rows = list.map(x=>`
     <tr>
       <td style="white-space:nowrap">${fmtDate(x.date)}</td>
-      <td><strong>${esc(x.description||"—")}</strong></td>
+      <td><strong>${esc(x.description||"—")}</strong>${x.taxEstimated?`<div class="hint">Includes ${money(x.estimatedTax)} estimated tax</div>`:""}</td>
       <td>${esc(x.category||"—")}</td>
       <td>${esc(x.enteredBy||"—")}</td>
       <td class="num money ${x.type==="income"?"amt-in":"amt-out"}">${x.type==="income"?"+":"−"}${money(x.amount)}</td>
@@ -1047,7 +1053,7 @@ function renderOrders(){
   const sync = S.integrations.find(item=>item.id==="googleForm");
   const syncNote = $("#form-sync-note");
   if(sync && sync.enabled){
-    syncNote.textContent = "Madness orders and their costs update from the sheet. "+(sync.syncStatuses ? "Ordered items are committed funds; received items are recorded as expenses. " : "Approval and receipt are managed here. ")+"Checks run every minute while open and catch up on your next visit. "
+    syncNote.textContent = "Madness orders and their costs update from the sheet. "+(sync.syncStatuses ? "Ordered items are committed funds; received items are recorded as expenses. " : "Approval and receipt are managed here. ")+"Checks run every minute while open. "+(sync.scheduledEveryDays ? "A scheduled check also runs every "+sync.scheduledEveryDays+" days while the owner’s computer and Codex are running. " : "Checks catch up on your next visit. ")
       + (S.formSyncBusy ? "Checking responses…" : S.formSyncMessage || (S.formLastChecked ? "Last checked: "+new Date(S.formLastChecked).toLocaleTimeString()+"." : "Ready to check responses."));
   }else{
     syncNote.textContent = "New purchase order opens the school form. Automatic import still needs to be connected; submissions will not appear here yet.";
@@ -1089,7 +1095,7 @@ function renderOrders(){
       : esc(o.vendor||"—");
     const need = o.neededBy ? ` · need by ${fmtDate(o.neededBy)}` : "";
     const origin = o.source==="google-form" ? `<div class="hint">Google Form · ${esc(o.team||"Madness")}${o.vendorSku?" · SKU "+esc(o.vendorSku):""}</div>` : "";
-    const costDetails = [o.shipping?money(o.shipping)+" shipping":"",o.tax?money(o.tax)+" tax":"",o.discount?"−"+money(o.discount)+" discount":""].filter(Boolean).join(" · ");
+    const costDetails = [o.shipping?money(o.shipping)+" shipping":"",o.taxEstimated?money(o.tax)+" estimated tax ("+(o.taxRateBps/100)+"%)":o.tax?money(o.tax)+" tax":"",o.discount?"−"+money(o.discount)+" discount":""].filter(Boolean).join(" · ");
     const costHint = o.source==="google-form" && !o.costsReviewed ? "Additional costs unconfirmed" : "";
     const sourceWarnings = (o.linkNeedsReview ? '<div class="hint">Purchase link unavailable</div>' : "") + (o.sourceStatusConflict ? '<div class="err">Sheet status conflicts with a recorded expense</div>' : "");
     const notes = o.notes ? `<div class="meta hint" style="margin-top:3px">${esc(o.notes)}</div>` : "";
@@ -1251,6 +1257,7 @@ $("#txn-save").addEventListener("click",async ()=>{
 });
 
 /* --- PO modal --- */
+function currentTaxPolicy(){ return S.integrations.find(item=>item.id==="googleForm")?.taxPolicy || TreasuryBudget.DEFAULT_TAX_POLICY; }
 function poComputedTotal(){
   const each=parseMoney($("#po-each").value);
   const qty=Number($("#po-qty").value);
@@ -1258,8 +1265,8 @@ function poComputedTotal(){
   for(const [key,id] of Object.entries({shipping:"po-ship",tax:"po-tax",discount:"po-discount"})){
     extras[key]=$("#"+id).value.trim() ? parseMoney($("#"+id).value) : 0;
   }
-  const costs=TreasuryBudget.calculateOrderCost({unitCost:each,qty,...extras});
-  return {each,qty,ship:extras.shipping,tax:extras.tax,discount:extras.discount,total:costs.totalCost,subtotal:costs.subtotal};
+  const costs=TreasuryBudget.priceOrder({unitCost:each,qty,...extras,taxMode:$("#po-tax").value.trim()?"manual":"estimate"},currentTaxPolicy());
+  return {...costs,each,qty,ship:extras.shipping,total:costs.totalCost};
 }
 ["po-each","po-qty","po-ship","po-tax","po-discount"].forEach(id=>$("#"+id).addEventListener("input",()=>{
   try{$("#po-total").textContent=money(poComputedTotal().total);}catch{$("#po-total").textContent="—";}
@@ -1293,6 +1300,7 @@ $("#po-save").addEventListener("click",async ()=>{
     await S.db.collection("orders").doc(uid()).set({
       partName:part, vendor, link, category:"Parts",
       unitCost:each, qty, shipping:ship, tax, discount, subtotal, totalCost:total, costsReviewed:true,
+      taxMode:costs.taxMode,taxTreatment:costs.taxTreatment,taxEstimated:costs.taxEstimated,taxRateBps:costs.taxRateBps,taxableBase:costs.taxableBase,
       requestedBy:S.me.name, requestedById:S.me.id,
       neededBy:$("#po-need").value||"", notes:$("#po-notes").value.trim(),
       status:"pending", expensed:false, createdAt:Date.now(),
@@ -1311,12 +1319,20 @@ function costInputs(order){
     const input=$("#order-"+key);
     extras[key]=(order.sourceCostFields||[]).includes(key) ? (order[key]||0) : input.value.trim() ? parseMoney(input.value) : 0;
   }
-  return {...extras,...TreasuryBudget.calculateOrderCost({unitCost:order.unitCost,qty:order.qty,...extras})};
+  const taxMode=(order.sourceCostFields||[]).includes("tax") ? "sheet" : $("#order-tax-mode").value;
+  return TreasuryBudget.priceOrder({unitCost:order.unitCost,qty:order.qty,...extras,taxMode,taxTreatment:$("#order-tax-treatment").value},currentTaxPolicy());
 }
 function previewOrderCosts(){
   const order=S.orders.find(item=>item.id===costEditing);
   if(!order) return;
-  try{$("#order-cost-total").textContent=money(costInputs(order).totalCost);$("#order-cost-err").textContent="";}
+  try{
+    const costs=costInputs(order),estimate=costs.taxEstimated;
+    $("#order-tax").disabled=estimate || costs.taxMode==="sheet";
+    $("#order-tax-treatment").disabled=!estimate;
+    if(estimate) $("#order-tax").value=(costs.tax/100).toFixed(2);
+    $("#order-tax-note").textContent=estimate ? "Estimated at "+(costs.taxRateBps/100)+"% for "+currentTaxPolicy().destination+" delivery on merchandise after discounts. Separately stated shipping is excluded. Replace with invoice tax when known." : "Confirmed tax takes priority, including an explicit $0.00.";
+    $("#order-cost-total").textContent=money(costs.totalCost);$("#order-cost-err").textContent="";
+  }
   catch(e){$("#order-cost-total").textContent="—";$("#order-cost-err").textContent=e.message;}
 }
 function openOrderCosts(id){
@@ -1328,10 +1344,15 @@ function openOrderCosts(id){
     $("#order-"+key).value=((order[key]||0)/100).toFixed(2);
     $("#order-"+key).disabled=(order.sourceCostFields||[]).includes(key);
   }
+  const sheetTax=(order.sourceCostFields||[]).includes("tax");
+  $("#order-tax-mode").value=sheetTax ? "sheet" : order.taxMode || (order.costsReviewed || order.tax>0 ? "manual" : "estimate");
+  $("#order-tax-mode").disabled=sheetTax;
+  $("#order-tax-treatment").value=order.taxTreatment || "taxable";
   $("#order-category").innerHTML=CATS.expense.map(category=>`<option ${category===(order.category||"Parts")?"selected":""}>${esc(category)}</option>`).join("");
   previewOrderCosts();openOverlay("#ov-order-costs");
 }
 ["shipping","tax","discount"].forEach(key=>$("#order-"+key).addEventListener("input",previewOrderCosts));
+["tax-mode","tax-treatment"].forEach(key=>$("#order-"+key).addEventListener("change",previewOrderCosts));
 $("#order-cost-save").addEventListener("click",async()=>{
   if(!can.ledger() || !costEditing)return;
   const btn=$("#order-cost-save");btn.disabled=true;

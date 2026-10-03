@@ -148,3 +148,50 @@ test('duplicate expenses block a row update without partially changing its order
   const result=sync.applyResponses(data,rows,1791000000000);
   assert.match(result.errors[0],/Multiple expenses/);assert.equal(data.orders[id],undefined);assert.equal(data.transactions.a.amount,1);
 });
+
+test('tax estimates use exact cents, discounted merchandise, and exclude shipping',()=>{
+  const price=input=>budget.priceOrder({unitCost:590,qty:15,taxMode:'estimate',...input});
+  assert.equal(price({}).tax,863);assert.equal(price({}).totalCost,9713);
+  assert.equal(price({shipping:1000,discount:500}).tax,814);
+  assert.equal(price({unitCost:10000,qty:1}).tax,975);
+  assert.equal(price({taxTreatment:'non-taxable'}).tax,0);
+  assert.equal(price({taxMode:'manual',tax:0}).taxEstimated,false);
+  assert.equal(price({taxMode:'sheet',tax:123}).tax,123);
+  assert.throws(()=>price({taxMode:'manual',tax:null}),/tax/);
+  assert.throws(()=>price({qty:1.5}),/Quantity/);
+  assert.throws(()=>price({discount:100000}),/Discount/);
+});
+
+test('estimated tax updates with quantity and discount, while manual and sheet zero override it',async()=>{
+  const policy=budget.DEFAULT_TAX_POLICY;
+  const responses=await sync.readResponses(headers+'\n'+line(),config);
+  const order=sync.toOrder(responses[0],1,{},policy);
+  assert.equal(order.tax,244);assert.equal(order.taxEstimated,true);
+  const changed=structuredClone(responses[0]);changed.values.qty='3';changed.values.discount='5';
+  assert.equal(sync.toOrder(changed,2,order,policy).tax,317);
+  const manual={...order,tax:0,taxMode:'manual'};
+  assert.equal(sync.toOrder(changed,2,manual,policy).tax,0);
+  assert.equal(sync.toOrder(changed,2,manual,policy).taxEstimated,false);
+  const zero=structuredClone(responses[0]);zero.values.tax='0';
+  assert.equal(sync.toOrder(zero,2,order,policy).taxMode,'sheet');
+  assert.equal(sync.toOrder(zero,2,order,policy).tax,0);
+  zero.values.tax='';
+  assert.equal(sync.toOrder(zero,2,order,policy).tax,244);
+  assert.equal(sync.toOrder(zero,2,order,policy).sourceCostFields.includes('tax'),false);
+  assert.equal(sync.toOrder(responses[0],1,{costsReviewed:true,tax:0},policy).taxMode,'manual');
+});
+
+test('confirmed tax replaces the estimate in one existing expense and repeat imports do nothing',async()=>{
+  const data={integrations:{googleForm:{...structuredClone(config),syncStatuses:true,taxPolicy:budget.DEFAULT_TAX_POLICY}}};
+  const rows=await sync.readResponses(headers+'\n'+line().replace('Robot,Ordered','Robot,Received'),config);
+  sync.applyResponses(data,rows,1791000000000);
+  const id=rows[0].id,expense=data.transactions['po_'+id];
+  assert.equal(expense.amount,2744);assert.equal(expense.taxEstimated,true);assert.equal(expense.estimatedTax,244);
+  const snapshot=JSON.stringify(data);
+  assert.deepEqual(sync.applyResponses(data,rows,1791000100000),{imported:0,updated:0,expenses:0,errors:[]});
+  assert.equal(JSON.stringify(data),snapshot);
+  rows[0].values.tax='1.00';sync.applyResponses(data,rows,1791000200000);
+  assert.equal(data.transactions['po_'+id].amount,2600);
+  assert.equal(data.transactions['po_'+id].taxEstimated,false);assert.equal(data.transactions['po_'+id].estimatedTax,0);
+  assert.equal(Object.keys(data.transactions).length,1);
+});

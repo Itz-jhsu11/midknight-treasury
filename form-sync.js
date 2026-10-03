@@ -77,7 +77,7 @@
     if(text==="pending" || text.startsWith("on hold")) return "pending";
     return null;
   }
-  function toOrder(response,now,existing={}){
+  function toOrder(response,now,existing={},policy){
     const value=response.values;
     if(response.error) throw new Error(response.error);
     const unitCost=budget.parseMoney(value.price);
@@ -85,13 +85,18 @@
     if(unitCost===null || unitCost<=0) throw new Error("Price must be a positive dollar amount with up to 2 decimal places");
     const extras={},sourceCostFields=[];
     for(const key of ["shipping","tax","discount"]){
-      if(Object.hasOwn(value,key)){
+      if(Object.hasOwn(value,key) && !(key==="tax" && value[key]==="" && policy?.enabled)){
         sourceCostFields.push(key);
         extras[key]=value[key]==="" ? 0 : budget.parseMoney(value[key]);
         if(extras[key]===null) throw new Error("Invalid "+key+" amount");
       }else extras[key]=existing[key] || 0;
     }
-    const costs=budget.calculateOrderCost({unitCost,qty,...extras});
+    let costs;
+    if(policy?.enabled){
+      const legacyConfirmed=!existing.taxMode && (existing.costsReviewed || existing.tax>0);
+      const taxMode=sourceCostFields.includes("tax") ? "sheet" : existing.taxMode==="manual" || legacyConfirmed ? "manual" : "estimate";
+      costs=budget.priceOrder({unitCost,qty,...extras,taxMode,taxTreatment:existing.taxTreatment||"taxable"},policy);
+    }else costs=budget.calculateOrderCost({unitCost,qty,...extras});
     if(!value.partName || !value.vendor) throw new Error("Part name and vendor are required");
     // A missing product link must not hide a real purchase or its expense.
     let link="";
@@ -118,7 +123,7 @@
       const backfill=(config.backfillIds || []).includes(response.id);
       if(response.id && config.seen[response.id] && !existing && !backfill) continue;
       try{
-        const order=toOrder(response,now,existing||{});
+        const order=toOrder(response,now,existing||{},config.taxPolicy);
         const linkedExpense=Object.values(data.transactions || {}).some(item=>item.poId===response.id && item.type==="expense");
         if(config.syncStatuses && (!existing || !existing.sourceStatusSyncEnabled || existing.sourceStatus!==order.sourceStatus)){
           const status=sourceStatus(order.sourceStatus);

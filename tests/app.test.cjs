@@ -32,7 +32,11 @@ async function fixture(role='admin',integration=false){
         return new Response(JSON.stringify({sha:String(version),content:Buffer.from(JSON.stringify(data)).toString('base64')}),{headers:{ETag:'v'+version}});
       };
     }});
-  await wait(50);
+  const deadline=Date.now()+5000;
+  while(!dom.window.eval('S.me && '+(integration?'S.formLastChecked && !S.formSyncBusy':'true'))){
+    if(Date.now()>deadline){dom.window.close();throw new Error('App did not finish initial loading');}
+    await wait(10);
+  }
   return {dom,window:dom.window,get data(){return data;},get puts(){return puts;},errors,
     conflict(fn){conflict=fn;},close(){dom.window.close();}};
 }
@@ -107,6 +111,7 @@ test('adjusting charges updates total, category budget, and the existing expense
     const d=app.window.document;
     d.querySelector('[data-f="finished"]').click();
     d.querySelector('[data-po-costs="charges"]').click();
+    d.querySelector('#order-tax-mode').value='manual';d.querySelector('#order-tax-mode').dispatchEvent(new app.window.Event('change'));
     d.querySelector('#order-shipping').value='5.25';d.querySelector('#order-tax').value='3.00';d.querySelector('#order-discount').value='2.00';
     d.querySelector('#order-tax').dispatchEvent(new app.window.Event('input'));
     assert.equal(d.querySelector('#order-cost-total').textContent,'$43.75');
@@ -126,5 +131,25 @@ test('invalid charges do not write an order or an expense',async()=>{
     d.querySelector('[data-po-costs="charges"]').click();d.querySelector('#order-discount').value='500';d.querySelector('#order-cost-save').click();await wait(30);
     assert.equal(app.puts,count);assert.equal(app.data.orders.charges.totalCost,100);assert.equal(Object.keys(app.data.transactions).length,0);
     assert.match(d.querySelector('#order-cost-err').textContent,/Discount/);
+  }finally{app.close();}
+});
+
+test('cost dialog recalculates estimates, allows exempt items, and saves invoice zero',async()=>{
+  const app=await fixture();try{
+    await app.window.eval('S.db.doc("orders/tax").set({partName:"Parts",qty:15,unitCost:590,totalCost:8850,status:"ordered"})');
+    const d=app.window.document,change=()=>new app.window.Event('change');
+    d.querySelector('[data-po-costs="tax"]').click();
+    assert.equal(d.querySelector('#order-tax').value,'8.63');assert.equal(d.querySelector('#order-tax').disabled,true);
+    d.querySelector('#order-discount').value='5';d.querySelector('#order-discount').dispatchEvent(new app.window.Event('input'));
+    assert.equal(d.querySelector('#order-tax').value,'8.14');
+    d.querySelector('#order-cost-save').click();await wait(40);
+    assert.equal(app.data.orders.tax.taxEstimated,true);assert.equal(app.data.orders.tax.totalCost,9164);
+    d.querySelector('[data-po-costs="tax"]').click();d.querySelector('#order-tax-treatment').value='non-taxable';
+    d.querySelector('#order-tax-treatment').dispatchEvent(change());assert.equal(d.querySelector('#order-tax').value,'0.00');
+    d.querySelector('#order-tax-mode').value='manual';d.querySelector('#order-tax-mode').dispatchEvent(change());
+    assert.equal(d.querySelector('#order-tax').disabled,false);
+    d.querySelector('#order-tax').value='0';d.querySelector('#order-cost-save').click();await wait(40);
+    assert.equal(app.data.orders.tax.tax,0);assert.equal(app.data.orders.tax.taxEstimated,false);
+    assert.deepEqual(app.errors,[]);
   }finally{app.close();}
 });

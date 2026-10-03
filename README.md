@@ -52,7 +52,10 @@ public site repository. This integration does not change the sheet's sharing.
   to the page, and every 60 seconds while the page is visible. Google export caching,
   network latency, or browser background throttling can delay a response.
 - When the treasury is closed, Google Forms continues recording submissions. The next
-  signed-in visit catches up. There is no background server or scheduled Actions job.
+  signed-in visit catches up. An owner-side Codex automation also runs the same import
+  every 72 hours, including while the website is closed. It requires the owner’s computer
+  to be awake, Codex running, this checkout available, and the existing `gh` login valid.
+  This is a local scheduled check, not a hosted server or GitHub Actions job.
 - Only `Team = Madness` is imported. Mayhem and Shared do not enter this treasury.
 - With `integrations.googleForm.syncStatuses` enabled, Received/Delivered/Finished
   become Received, Ordered/Purchased become Ordered, Approved becomes Approved, and
@@ -68,11 +71,15 @@ public site repository. This integration does not change the sheet's sharing.
   the number of items/packs requested; a pack size in a product name is not another
   multiplier. Charges and discounts are dollar amounts for that row, applied once.
 - Optional sheet columns `Shipping` (or `Shipping Cost`), `Tax` (or `Sales Tax`), and
-  `Discount` supply those charges. Blank values in present columns mean zero. Two
-  columns for the same charge are rejected. No tax rate or shipping fee is guessed.
+  `Discount` supply those charges. Blank shipping/discount values mean zero. Blank
+  tax is unconfirmed and uses the estimate below; an explicit `0` is confirmed zero.
+  Two columns for the same charge are rejected. Shipping is not guessed.
 - When charge columns are absent, treasurers/admins use **Adjust costs** to enter
   those charges and select a budget category. Those amounts survive later imports.
-  Fields supplied by the sheet are read-only in the cost dialog. Imported amounts
+  Confirmed fields supplied by the sheet are read-only in the cost dialog. Tax can
+  use the automatic estimate, a confirmed invoice amount (including zero), or a
+  non-taxable/exempt classification. An invoice amount survives later quantity edits;
+  estimates recalculate with quantity, unit price, and discounts. Imported amounts
   show “Additional costs unconfirmed” until reviewed or shipping and tax columns
   are supplied. Adjusting a received order updates its existing ledger expense.
 - Requester email appears in the private order list because the form collects email,
@@ -104,3 +111,34 @@ moves from committed to actual spending. Spreadsheet receipt status uses this sa
 ledger reconciliation. Expense records with a matching purchase order ID are not also
 counted as commitments. Unrecognized legacy expense categories
 are shown under Other; orders without a category use Parts.
+
+## Estimated tax and scheduled updates
+
+The configured estimate assumes delivery to **TKA in Sunnyvale, California**. The
+[CDTFA city rate table](https://cdtfa.ca.gov/taxes-and-fees/rates.aspx), checked October
+3, 2026, lists **9.75%**. The estimate is stored in the private data connection as
+`integrations.googleForm.taxPolicy`; it is not a claim about the actual tax collected.
+
+`Estimated tax = round((price × quantity − merchandise discount) × 9.75%, to cents)`.
+The taxable base is floored at zero. Separately stated shipping is excluded from this
+estimate. Supplier names do not determine arbitrary rates: physical parts from
+Amazon, goBILDA, REV, WCP, and other suppliers use the same destination estimate.
+Invoices can differ because of delivery address, exemptions, or shipping/handling
+rules; enter confirmed invoice tax to replace the estimate. Select non-taxable/exempt
+only for items that qualify. This also sets the estimate to zero for such items.
+
+Estimates apply to existing and new unreviewed Madness responses. Previously reviewed
+charges and positive legacy tax are preserved as confirmed. Explicit sheet tax takes
+priority. Estimated taxes are labeled on purchase orders and linked expenses, and are
+included in commitments, spending, balances, and remaining category budgets. Received
+orders therefore include a tax reserve until confirmed; recorded spending is not a
+bank-statement reconciliation.
+
+The durable scheduled command is `node scripts/sync-orders.cjs --apply --scheduled`.
+It fetches fresh responses, follows the same rules as browser import, retries concurrent
+GitHub edits, verifies the saved revision, and skips writes if nothing changed. It never
+stores raw response rows or credentials locally. Run without `--apply` for a preview.
+Initial setup uses `--enable-estimated-tax` to add the default policy only if absent.
+The schedule is managed by the owner's Codex automation, not by this public repository.
+Changes to tax rates require reviewing and updating the policy; they are not silently
+inferred from supplier names. Source errors preserve existing rows and report failure.
